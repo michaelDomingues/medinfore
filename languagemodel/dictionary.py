@@ -3,43 +3,46 @@
 import itertools
 import os
 
+import logging
 import nltk
-import pprint
-import sys
 
 from collections import Counter, defaultdict
 from gensim import corpora, models
 from gensim import similarities
 
 from utilities.consts import INDEX_TYPE_MatrixSimilarity, INDEX_TYPE_Similarity, DICT_PATH, CORPUS_PATH, INDEX_PATH, \
-    INDEX_MM_PATH
+    INDEX_MM_PATH, LSI_MODEL
 
 
 class Dictionary:
     def __init__(self, load_from_disk: bool, index_type: str):
-        self.__words_core = defaultdict(lambda: defaultdict(lambda: Counter()))
+        self.__ngram_levels = 2
+        if self.__ngram_levels == 3:
+            self.__terms_core = defaultdict(lambda: defaultdict(lambda: Counter()))
+        else:
+            self.__terms_core = defaultdict(lambda: Counter())
         self.__index_type = index_type
-        self.__words_tf = Counter()
-        self.__ngram_size = 3
-        self.__pp = pprint.PrettyPrinter(indent=4)
+        self.__terms_frequency = Counter()
+        # self.__pp = pprint.PrettyPrinter(indent=4)
         self.__corpus_list = []
         self.__dictionary = None
         self.__corpus = None
         self.__index = None
-        self.__lsi = None
+        self.__lsi_model = None
+        self.__tfidf = None
 
         if load_from_disk:
-            print('Load data from disk...')
+            logging.info('Load data from disk...')
             self.__load_dict()
             self.__load_corpus()
-            self.__lsi_space()
+            self.__load_lsi_model()
             self.__load_index()
 
         else:
             self.__clean_files()
             self.__dictionary = corpora.Dictionary()
-            #self.__dictionary.save(DICT_PATH)
-            # Change this to something memory-friendly
+            # self.__dictionary.save(DICT_PATH)
+            # TODO: Change this to something memory-friendly
 
     def __clean_files(self: bool):
         """
@@ -60,7 +63,7 @@ class Dictionary:
         Removes words that appear just 1 time in all corpus
         :return:
         """
-        self.__corpus_list = [[word for word in doc_tokens if self.__words_tf[word] > 1] for doc_tokens in
+        self.__corpus_list = [[word for word in doc_tokens if self.__terms_frequency[word] > 1] for doc_tokens in
                               self.__corpus_list]
 
     def build_word_knowledge(self, tokens: list) -> None:
@@ -71,16 +74,37 @@ class Dictionary:
         """
         self.__doc2dictionary(tokens=tokens)
         for word in iter(tokens):
-            self.__words_tf[word] += 1
+            self.__terms_frequency[word] += 1
+        self.__ngrams(tokens=tokens)
 
     def __ngrams(self, tokens: list) -> None:
-        ngrams = nltk.ngrams(tokens, self.__ngram_size)
-        for grams in iter(ngrams):
-            words_list = [grams[0], grams[1], grams[2]]
-            if words_list:
-                self.__words_core[words_list[0]][words_list[1]].update([words_list[2]])
+        ngrams = nltk.ngrams(tokens, self.__ngram_levels)
+        for seq in iter(ngrams):
+            if self.__ngram_levels == 3:
+                self.__terms_core[seq[0]][seq[1]].update([seq[2]])
             else:
-                raise ValueError('%s: Tokens not valid - %s' % (sys._getframe().f_code.co_name, words_list))
+                self.__terms_core[seq[0]].update([seq[1]])
+
+    def get_words_core(self) -> defaultdict:
+        """
+        Returns words core relationships.
+        :return:
+        """
+        return self.__terms_core
+
+    def get_terms_frequency(self) -> Counter:
+        """
+        Returns terms frequency.
+        :return:
+        """
+        return self.__terms_frequency
+
+    def get_number_docs(self) -> int:
+        """
+        Return dictionary number of docs
+        :return:
+        """
+        return self.__dictionary.num_docs
 
     def __doc2dictionary(self, tokens: list) -> None:
         """
@@ -153,6 +177,13 @@ class Dictionary:
         #     print(doc[0])
         # corpus = corpora.MmCorpus(CORPUS_PATH)
 
+    def __load_lsi_model(self) -> None:
+        """
+        Loads LSI model from disk
+        :return:
+        """
+        self.__lsi_model = models.LsiModel.load(fname=LSI_MODEL)
+
     def __lsi_space(self):
         """
         Builds lsi model
@@ -160,7 +191,9 @@ class Dictionary:
         """
         assert (self.__dictionary != None), "Dictionary not created yet!"
         assert (self.__corpus != None), "Corpus not loaded yet!"
-        self.__lsi = models.LsiModel(self.__corpus, id2word=self.__dictionary, num_topics=2)
+        self.__tfidf = models.TfidfModel(self.__corpus, normalize=True)
+        self.__lsi_model = models.LsiModel(self.__tfidf[self.__corpus], id2word=self.__dictionary, num_topics=400)
+        self.__lsi_model.save(fname=LSI_MODEL)
 
     def __save_index(self):
         """
@@ -187,13 +220,13 @@ class Dictionary:
         self.__lsi_space()
 
         if self.__index_type == INDEX_TYPE_MatrixSimilarity:
-            self.__index = similarities.MatrixSimilarity(self.__lsi[self.__corpus])
+            self.__index = similarities.MatrixSimilarity(self.__lsi_model[self.__corpus])
         elif self.__index_type == INDEX_TYPE_Similarity:
             self.__index = similarities.Similarity(output_prefix='./index', corpus=self.__corpus,
                                                    num_features=len(self.__dictionary))
         self.__save_index()
 
-    def word_relation_vector(self, word: str) -> list:
+    def term_relation_vector(self, word: str) -> list:
         """
         Builds a word relation to help on building word vector to enigma.
         e.g: [('Office', '2016', 'The', 1), ('Office', '2016', 'for', 1)]
@@ -201,7 +234,7 @@ class Dictionary:
         :return: list of relation for given word
         """
         result = []
-        for inner_relation in self.__words_core[word].items():
+        for inner_relation in self.__terms_core[word].items():
             inner_word = inner_relation[0]
             counter = inner_relation[1]
             for counter_word in counter.elements():
@@ -218,13 +251,7 @@ class Dictionary:
         # TODO: Add logic for query with 1 or multiple strings
         # Conditional operators maybe.
         vec_bow = self.__generate_bow(tokens=query.lower().split())
-        vec_lsi = self.__lsi[vec_bow]  # convert the query to LSI space
-
+        vec_lsi = self.__lsi_model[vec_bow]  # convert the query to LSI space
         sims = self.__index[vec_lsi]
-        #sims = sorted(enumerate(sims), key=lambda item: -item[1])
-        print('Search results: ', list(enumerate(sims)))
         return list(enumerate(sims))
-
-        # self.__pp.pprint(self.__words_core)
-        # self.__pp.pprint(self.__words_tf)
-        # print(self.word_relation_vector('Office'))
+        # Result: [(2, 0.99844527), (0, 0.99809301) ]

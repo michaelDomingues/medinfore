@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
-from distutils.core import setup
+try:
+    from setuptools import setup
+except ImportError:
+    from distutils.core import setup
 
 setup(name='Medinfore',
-      version='1.0',
+      version='1.1.0',
       description='Indexing and searching engine in a medical corpus',
       author='Michael Domingues',
       author_email='dominguesjust@gmail.com',
@@ -15,6 +18,8 @@ setup(name='Medinfore',
           'Natural Language :: English',
           'Operating System :: OS Independent',
           'Programming Language :: Python :: 3.5',
+          'Topic :: Software Development :: Information Retrieval',
       ],
-      packages=['flask', 'nltk', 'gensim', 'pprint']
+      packages=['api', 'documenthandler', 'languagemodel', 'redisdb', 'utilities'],
+      install_requires=['flask', 'nltk', 'numpy', 'gensim', 'pprint', 'redis', 'PyMedTermino']
       )
